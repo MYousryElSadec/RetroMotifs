@@ -98,7 +98,7 @@ def write_fasta(path: Path, records: list[tuple[str, str]]):
 
 def main():
     parser = argparse.ArgumentParser(description="Generate per-tile FASTAs from tiled sequences")
-    parser.add_argument("--sequences", default="data/sequences.tsv", help="Path to sequences TSV")
+    parser.add_argument("--sequences", default="data/sequences_all.tsv", help="Path to sequences TSV")
     parser.add_argument("--outdir", default="results", help="Output directory")
     args = parser.parse_args()
 

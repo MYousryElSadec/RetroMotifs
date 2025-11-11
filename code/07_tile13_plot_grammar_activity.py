@@ -1,42 +1,41 @@
 #!/usr/bin/env python3
 """
-Plot activity distributions (log2FoldChange) per motif grammar for Tile 6.
+Plot activity distributions (log2FoldChange) per motif grammar for Tile 13.
 
-Inputs expected (produced by 06_tile6_motif_grammar.py):
-  - ../results/motif_counts/tile6_site_presence_fixedbins.tsv
-  - ../results/motif_counts/tile6_site_combination_counts_fixedbins.tsv
+Inputs expected (produced by 06_tile13_motif_grammar.py):
+  - ../results/motif_counts/tile13_site_presence_fixedbins.tsv
+  - ../results/motif_counts/tile13_site_combination_counts_fixedbins.tsv
 And activity metrics:
   - ../data/activity/OL53_run_Jurkat_berkay_activity.tsv
-  - ../data/activity/comparison_StimJurkat_vs_Jurkat_berkay.tsv
-  - ../data/activity/comparison_TNF_vs_Ctrl.tsv
+  - ../data/activity/comparison_INFg_vs_Ctrl.tsv
 
 Behavior
 --------
 - Keeps only motif grammars (signatures) with ≥ 10 isolates.
-- Y-axis lists grammars; for each y-row we draw a 7-slot rectangle representing
-  sites: [N1, N2, N3, (N4|S1), S2, S3, S4].
-    * Fill color for present sites:
-        - NFKB/REL: teal (#008080)
-        - SP/KLF  : purple (#6A0DAD)
-      Absent sites are light gray (#eeeeee) with a thin edge.
-      For the shared bin (N4|S1) if both are present, we split the segment into
-      two halves (left teal, right purple).
+- Y-axis lists grammars; for each y-row we draw a 4-slot rectangle representing
+  sites (half‑open reference bins):
+    1) slot2 bin [40,55): IRF_x2_site2 **or** E2F_site1 (mutually exclusive)
+    2) slot3 bin [60,80): IRF_x3_site1 **or** IRF_x2_site3 (mutually exclusive)
+    3) E2F_site2
+    4) SP/KLF_site1
+  Absent sites are light gray (#eeeeee) with a thin edge. If both families are present
+  in a mutually exclusive slot (rare), priority is E2F over IRF_x2 for [40,55) and IRF_x3
+  over IRF_x2 for [60,80).
 - X-axis is activity (log2FoldChange) as horizontal violins for isolates within
   each grammar.
-- Shows three violin panels: baseline (Jurkat), Stim (Jurkat), and TNF.
+- Shows two violin panels: baseline (Jurkat) and INFg.
 - Saves PDF and PNG.
 
 Usage
 -----
-python 07_tile6_plot_grammar_activity.py \
-  --presence ../results/motif_grammar/tile6_site_presence_fixedbins.tsv \
-  --counts   ../results/motif_grammar/tile6_site_combination_counts_fixedbins.tsv \
+python 07_tile13_plot_grammar_activity.py \
+  --presence ../results/motif_grammar/tile13_site_presence_fixedbins.tsv \
+  --counts   ../results/motif_grammar/tile13_site_combination_counts_fixedbins.tsv \
   --baseline ../data/activity/OL53_run_Jurkat_berkay_activity.tsv \
-  --stim     ../data/activity/comparison_StimJurkat_vs_Jurkat_berkay.tsv \
-  --tnf      ../data/activity/comparison_TNF_vs_Ctrl.tsv \
+  --ifng     ../data/activity/comparison_INFg_vs_Ctrl.tsv \
   --min-n 3 \
-  --order-by stim \
-  --outfig ../results/figures/tile6_grammar_activity_3iso
+  --order-by ifng \
+  --outfig ../results/figures/tile13_grammar_activity_3iso
 """
 from __future__ import annotations
 import argparse
@@ -47,14 +46,17 @@ import pandas as pd
 import matplotlib.pyplot as plt
 from matplotlib.patches import Rectangle, Wedge
 
-FAM_NFKB = "NFKB/REL"
-FAM_SPKLF = "SP/KLF"
-
 # Colors
-COL_NFKB = "#66a3a3"   # muted teal
-COL_SP   = "#9370db"   # muted purple (medium purple)
 COL_ABS  = "#eeeeee"
 EDGE     = "#555555"
+
+# Family color mapping for Tile 13
+FAMILY_COLORS = {
+    "IRF_x2": "#7FB6E0",  # softer sky blue (muted)
+    "IRF_x3": "#005F73",  # intense blue‑teal (more saturated/darker)
+    "E2F":     "#8FBF88",  # muted green
+    "SP/KLF":  "#9370db",  # muted purple (kept)
+}
 
 CLADE_ORDER = ["A", "B", "C", "D", "AE", "F", "G", "H", "O", "Other"]
 CLADE_COLORS = {
@@ -78,16 +80,28 @@ SUBTYPE_MAP = {
     "AE": "AE", "CRF01_AE": "AE"
 }
 
-SITES = [
-    f"{FAM_NFKB}_site1",
-    f"{FAM_NFKB}_site2",
-    f"{FAM_NFKB}_site3",
-    # shared slot: (NFKB_site4 | SP_site1)
-    (f"{FAM_NFKB}_site4", f"{FAM_SPKLF}_site1"),
-    f"{FAM_SPKLF}_site2",
-    f"{FAM_SPKLF}_site3",
-    f"{FAM_SPKLF}_site4",
-]
+# Four-slot grammar layout for Tile 13 (excluding IRF_x2_site1)
+#  slot1: IRF_x2_site2 OR E2F_site1 (mutually exclusive bin [40,55))
+#  slot2: IRF_x3_site1  OR IRF_x2_site3 (mutually exclusive bin [60,80))
+#  slot3: E2F_site2
+#  slot4: SP/KLF_site1
+
+FOUR_SLOTS = (
+    ("IRF_x2_site2", "E2F_site1"),   # slot 1 (either)
+    ("IRF_x3_site1", "IRF_x2_site3"),# slot 2 (either)
+    ("E2F_site2",),                    # slot 3
+    ("SP/KLF_site1",),                 # slot 4
+)
+
+# Priority when both families appear in a mutually exclusive slot (rare):
+#  - slot1 ([40,55)): prefer E2F over IRF_x2
+#  - slot2 ([60,80)): prefer IRF_x3 over IRF_x2
+SLOT_PRIORITY = {
+    1: ("E2F", "IRF_x2"),
+    2: ("IRF_x3", "IRF_x2"),
+    3: ("E2F",),
+    4: ("SP/KLF",),
+}
 
 
 def extract_isolate_from_id(s: str) -> str:
@@ -111,8 +125,8 @@ def load_presence_counts(presence_path: Path, counts_path: Path, min_n: int):
 
 def load_activity(activity_path: Path):
     act = pd.read_csv(activity_path, sep="\t")
-    # Filter to tile 6 only using the pattern :6:
-    act = act[act["ID"].astype(str).str.contains(r":6:")].copy()
+    # Filter to tile 13 only using the pattern :13:
+    act = act[act["ID"].astype(str).str.contains(r":13:")].copy()
     act["isolate"] = act["ID"].map(extract_isolate_from_id)
     return act[["ID", "isolate", "log2FoldChange"]]
 
@@ -163,39 +177,39 @@ def load_isolate_to_clade_map(path: Path) -> dict:
 
 
 def draw_grammar_rect(ax, row_idx: int, pres_row: pd.Series, x0: float = 0.0, width: float = 1.0, height: float = 0.8):
-    """Draw the 7-slot rectangle for one grammar at y=row_idx on ax.
+    """Draw the 4-slot rectangle for one grammar at y=row_idx on ax.
     x0/width are in axis data units (we'll use a separate axes with unit scale).
     """
-    seg_w = width / 7.0
+    seg_w = width / 4.0
     y = row_idx - height/2
 
     def add_rect(x, w, color):
         ax.add_patch(Rectangle((x, y), w, height, facecolor=color, edgecolor=EDGE, linewidth=0.5))
 
-    for k in range(7):
-        slot = SITES[k]
+    for k in range(4):
         x = x0 + k * seg_w
-        if isinstance(slot, tuple):
-            n4, s1 = slot
-            has_n4 = bool(pres_row.get(n4, False))
-            has_s1 = bool(pres_row.get(s1, False))
-            if has_n4 and has_s1:
-                # split half/half
-                add_rect(x, seg_w/2, COL_NFKB)
-                add_rect(x + seg_w/2, seg_w/2, COL_SP)
-            elif has_n4:
-                add_rect(x, seg_w, COL_NFKB)
-            elif has_s1:
-                add_rect(x, seg_w, COL_SP)
-            else:
-                add_rect(x, seg_w, COL_ABS)
+        site_names = FOUR_SLOTS[k]
+        # Determine presence and family to color by
+        present_fams = []
+        for sname in site_names:
+            if bool(pres_row.get(sname, False)):
+                fam = sname.split("_site")[0]
+                present_fams.append(fam)
+        if not present_fams:
+            add_rect(x, seg_w, COL_ABS)
         else:
-            present = bool(pres_row.get(slot, False))
-            if not present:
-                add_rect(x, seg_w, COL_ABS)
-            else:
-                color = COL_NFKB if "NFKB/REL" in slot else COL_SP
-                add_rect(x, seg_w, color)
+            # choose by SLOT_PRIORITY
+            pri = SLOT_PRIORITY.get(k+1, ())
+            chosen_fam = None
+            for fam in pri:
+                if fam in present_fams:
+                    chosen_fam = fam
+                    break
+            if chosen_fam is None:
+                # fallback to first present family
+                chosen_fam = present_fams[0]
+            color = FAMILY_COLORS.get(chosen_fam, "#666666")
+            add_rect(x, seg_w, color)
 
     # set limits for this small canvas
     ax.set_xlim(x0, x0 + width)
@@ -218,55 +232,61 @@ def draw_pie(ax, center_x: float, center_y: float, frac_by_clade: dict, radius: 
         start_angle += theta
 
 
-def plot_grammars_with_activity(presence_path: Path, counts_path: Path, base_path: Path, stim_path: Path, tnf_path: Path, clades_path: Path, min_n: int, outprefix: Path, order_by: str = "stim"):
+def plot_grammars_with_activity(
+    presence_path: Path,
+    counts_path: Path,
+    base_path: Path,
+    ifng_path: Path,
+    clades_path: Path,
+    min_n: int,
+    outprefix: Path,
+    order_by: str = "baseline"
+):
     pres, cnts, order = load_presence_counts(presence_path, counts_path, min_n)
-    act_stim = load_activity(stim_path)
-    act_tnf = load_activity(tnf_path)
+    act_ifng = load_activity(ifng_path)
     act_base = load_activity(base_path)
 
     iso2clade = load_isolate_to_clade_map(clades_path)
 
     # Collect activity rows using initial order
     rows_base_o = collect_activity_by_signature(pres, order, act_base)
-    rows_stim_o = collect_activity_by_signature(pres, order, act_stim)
-    rows_tnf_o  = collect_activity_by_signature(pres, order, act_tnf)
+    rows_ifng_o = collect_activity_by_signature(pres, order, act_ifng)
 
     # Choose which condition determines row ordering (by median, desc)
     order_src = order_by.lower().strip()
-    if order_src not in {"stim", "baseline", "tnf"}:
-        order_src = "stim"
-    rows_src = {"stim": rows_stim_o, "baseline": rows_base_o, "tnf": rows_tnf_o}[order_src]
+    if order_src not in {"baseline", "ifng"}:
+        order_src = "baseline"
+    rows_src = {"baseline": rows_base_o, "ifng": rows_ifng_o}[order_src]
     med_list = []
     for sig, _iso, vals in rows_src:
         median_val = float(np.median(vals)) if vals.size > 0 else np.nan
         med_list.append((sig, median_val))
     ordered_sigs = [sig for sig, _ in sorted(med_list, key=lambda x: (np.isnan(x[1]), -x[1] if not np.isnan(x[1]) else 0))]
 
-    # Build rows for all three conditions in the chosen order
+    # Build rows for both conditions in the chosen order
     rows_base = collect_activity_by_signature(pres, ordered_sigs, act_base)
-    rows_stim = collect_activity_by_signature(pres, ordered_sigs, act_stim)
-    rows_tnf  = collect_activity_by_signature(pres, ordered_sigs, act_tnf)
+    rows_ifng = collect_activity_by_signature(pres, ordered_sigs, act_ifng)
 
-    n = len(rows_stim)
+    n = len(rows_base)
     if n == 0:
         print("No grammar groups meet the minimum isolate threshold.")
         return
 
-    # Build figure: five columns (leftmost: pies, then grammar rectangles, then three violin plots)
-    fig = plt.figure(figsize=(18, max(3.5, 0.6 * n)))
-    gs = fig.add_gridspec(nrows=1, ncols=5, width_ratios=[0.95, 0.95, 3.0, 3.0, 3.0])
+    # Build figure: four columns (leftmost: pies, then grammar rectangles, then two violin plots)
+    fig = plt.figure(figsize=(14, max(3.5, 0.6 * n)))
+    gs = fig.add_gridspec(nrows=1, ncols=4, width_ratios=[0.95, 0.80, 3.0, 3.0])
     axP = fig.add_subplot(gs[0, 0])  # pies axis (leftmost)
     axG = fig.add_subplot(gs[0, 1])  # grammar glyphs + labels
     axB = fig.add_subplot(gs[0, 2])
-    axS = fig.add_subplot(gs[0, 3])
-    axT = fig.add_subplot(gs[0, 4])
-    # Bring glyphs a touch closer to pies
+    axT = fig.add_subplot(gs[0, 3])
     gs.update(wspace=0.08)
 
     # Prepare legend handles (figure-level legend placed in a clear area)
     legend_handles = [
-        Rectangle((0,0), 1, 1, facecolor=COL_NFKB, edgecolor=EDGE, linewidth=0.5),
-        Rectangle((0,0), 1, 1, facecolor=COL_SP, edgecolor=EDGE, linewidth=0.5),
+        Rectangle((0,0), 1, 1, facecolor=FAMILY_COLORS["IRF_x2"], edgecolor=EDGE, linewidth=0.5),
+        Rectangle((0,0), 1, 1, facecolor=FAMILY_COLORS["IRF_x3"], edgecolor=EDGE, linewidth=0.5),
+        Rectangle((0,0), 1, 1, facecolor=FAMILY_COLORS["E2F"],    edgecolor=EDGE, linewidth=0.5),
+        Rectangle((0,0), 1, 1, facecolor=FAMILY_COLORS["SP/KLF"], edgecolor=EDGE, linewidth=0.5),
     ]
 
     # Prepare y positions (top-to-bottom)
@@ -274,7 +294,6 @@ def plot_grammars_with_activity(presence_path: Path, counts_path: Path, base_pat
     axP.set_ylim(0.5, n + 0.5)
     axG.set_ylim(0.5, n + 0.5)
     axB.set_ylim(0.5, n + 0.5)
-    axS.set_ylim(0.5, n + 0.5)
     axT.set_ylim(0.5, n + 0.5)
     # Match row ordering with other panels so pies move with row reordering
     axP.invert_yaxis()
@@ -292,10 +311,10 @@ def plot_grammars_with_activity(presence_path: Path, counts_path: Path, base_pat
     axG.set_xticks([])
     axG.set_yticks(y_positions)
     labels = []
-    for i, (sig, iso_list, vals) in enumerate(rows_stim, start=1):
+    for i, (sig, iso_list, vals) in enumerate(rows_base, start=1):
         # representative row from presence for drawing the sites
         pres_row = pres[pres["signature"] == sig].iloc[0]
-        draw_grammar_rect(axG, i, pres_row, x0=0.0, width=7.0, height=0.8)
+        draw_grammar_rect(axG, i, pres_row, x0=0.0, width=4.0, height=0.8)
         count = len(iso_list)
         labels.append(f"n={count}")
         # pie: fraction of clades among isolates in this grammar (drawn on axP)
@@ -307,8 +326,8 @@ def plot_grammars_with_activity(presence_path: Path, counts_path: Path, base_pat
             clade_counts[cl] = clade_counts.get(cl, 0) + 1
         draw_pie(axP, 0.5, i, clade_counts, radius=0.45)
     axG.set_yticklabels(labels, fontsize=11)
-    axG.set_title("Motif grammars (Tile 6)", fontsize=12)
-    axG.set_xlim(0, 7.0)
+    axG.set_title("Motif grammars (Tile 13 — 4 slots)", fontsize=12)
+    axG.set_xlim(0, 4.0)
     axG.invert_yaxis()  # top grammar at top
     axG.tick_params(axis='y', pad=1)
 
@@ -339,26 +358,15 @@ def plot_grammars_with_activity(presence_path: Path, counts_path: Path, base_pat
     axB.set_xlabel('Baseline Activity (log2FC)', fontsize=12)
     axB.invert_yaxis()
 
-    # Stim violins
-    axS.set_yticks(y_positions)
-    axS.set_yticklabels([])
-    for i, (_sig, _iso, vals_stim) in enumerate(rows_stim, start=1):
-        draw_simple_violin(axS, i, vals_stim)
-    axS.tick_params(axis='both', labelsize=11)
-    for spine in ["top", "right"]:
-        axS.spines[spine].set_visible(False)
-    axS.set_xlabel('PMA+αCD3 Delta Activity (log2FC)', fontsize=12)
-    axS.invert_yaxis()
-
-    # TNF violins
+    # INFg violins
     axT.set_yticks(y_positions)
     axT.set_yticklabels([])
-    for i, (_sig, _iso, vals_tnf) in enumerate(rows_tnf, start=1):
-        draw_simple_violin(axT, i, vals_tnf)
+    for i, (_sig, _iso, vals_ifng) in enumerate(rows_ifng, start=1):
+        draw_simple_violin(axT, i, vals_ifng)
     axT.tick_params(axis='both', labelsize=11)
     for spine in ["top", "right"]:
         axT.spines[spine].set_visible(False)
-    axT.set_xlabel('TNF Delta Activity (log2FC)', fontsize=12)
+    axT.set_xlabel('INFg Delta Activity (log2FC)', fontsize=12)
     axT.invert_yaxis()
 
     # Clade legend (top-center)
@@ -366,11 +374,11 @@ def plot_grammars_with_activity(presence_path: Path, counts_path: Path, base_pat
                      for c in CLADE_ORDER]
     clade_labels = CLADE_ORDER
     fig.legend(clade_handles, clade_labels, loc='upper center', ncol=len(CLADE_ORDER),
-               frameon=False, fontsize=9, bbox_to_anchor=(0.5, 0.99))
+               frameon=False, fontsize=9, bbox_to_anchor=(0.7, 0.99))
 
     # Site-type legend (bottom-right outside last panel)
-    fig.legend(legend_handles, ["NFKB/REL", "SP/KLF"], loc='lower right',
-               frameon=False, fontsize=10, bbox_to_anchor=(0.32, 0.85))
+    fig.legend(legend_handles, ["IRF_x2", "IRF_x3", "E2F", "SP/KLF"], loc='lower right',
+               frameon=False, fontsize=10, bbox_to_anchor=(0.36, 0.75))
 
     fig.subplots_adjust(left=0.04, right=0.995, top=0.93, bottom=0.08)
 
@@ -383,20 +391,28 @@ def plot_grammars_with_activity(presence_path: Path, counts_path: Path, base_pat
 
 
 def main():
-    p = argparse.ArgumentParser(description='Plot activity violins per motif grammar with 7-slot grammar glyphs (Tile 6)')
-    p.add_argument('--presence', default='../results/motif_counts/tile6_site_presence_fixedbins.tsv')
-    p.add_argument('--counts',   default='../results/motif_counts/tile6_site_combination_counts_fixedbins.tsv')
+    p = argparse.ArgumentParser(description='Plot activity violins per motif grammar with 4-slot grammar glyphs (Tile 13)')
+    p.add_argument('--presence', default='../results/motif_counts/tile13_site_presence_fixedbins.tsv')
+    p.add_argument('--counts',   default='../results/motif_counts/tile13_site_combination_counts_fixedbins.tsv')
     p.add_argument('--baseline', default='../data/activity/OL53_run_Jurkat_berkay_activity.tsv')
-    p.add_argument('--stim',     default='../data/activity/comparison_StimJurkat_vs_Jurkat_berkay.tsv')
-    p.add_argument('--tnf',      default='../data/activity/comparison_TNF_vs_Ctrl.tsv')
+    p.add_argument('--ifng',     default='../data/activity/comparison_INFg_vs_Ctrl.tsv')
     p.add_argument('--clades',   default='../data/clades.tsv')
     p.add_argument('--min-n', type=int, default=10)
-    p.add_argument('--order-by', choices=['stim','baseline','tnf'], default='stim', help='Order grammars by median activity of this condition')
-    p.add_argument('--outfig', default='../results/figures/tile6_grammar_activity')
+    p.add_argument('--order-by', choices=['baseline','ifng'], default='baseline', help='Order grammars by median activity of this condition')
+    p.add_argument('--outfig', default='../results/figures/tile13_grammar_activity')
     args = p.parse_args()
 
     outprefix = Path(str(args.outfig) + f'_{args.order_by}Ordered')
-    plot_grammars_with_activity(Path(args.presence), Path(args.counts), Path(args.baseline), Path(args.stim), Path(args.tnf), Path(args.clades), args.min_n, outprefix, args.order_by)
+    plot_grammars_with_activity(
+        Path(args.presence),
+        Path(args.counts),
+        Path(args.baseline),
+        Path(args.ifng),
+        Path(args.clades),
+        args.min_n,
+        outprefix,
+        args.order_by
+    )
 
 
 if __name__ == '__main__':
