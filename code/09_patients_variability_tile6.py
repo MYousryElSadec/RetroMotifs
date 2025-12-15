@@ -4,6 +4,19 @@ import csv
 from collections import defaultdict
 import sys
 
+"""
+python3 09_patients_variability.py \
+  --selected-patients ../data/patients/tile6_patients_selected.tsv \
+  --patient-map ../data/patients/patients_accession_map.tsv \
+  --site-presence ../results/motif_grammar_patients/tile6_site_presence_fixedbins.tsv \
+  > ../results/patients_variability/patient_tile6_signature_counts.tsv
+
+python3 09_patients_variability.py \
+  --selected-patients ../data/patients/tile13_patients_selected.tsv \
+  --patient-map ../data/patients/patients_accession_map.tsv \
+  --site-presence ../results/motif_grammar_patients/tile13_site_presence_fixedbins.tsv \
+  > ../results/patients_variability/patient_tile13_signature_counts.tsv
+"""
 
 def load_selected_patients(path):
     patients = []

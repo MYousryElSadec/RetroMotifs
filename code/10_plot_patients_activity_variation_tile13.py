@@ -37,14 +37,15 @@ python 07_tile13_plot_grammar_activity.py \
   --order-by ifng \
   --outfig ../results/figures/tile13_grammar_activity_3iso
 
-python 07_tile13_plot_grammar_activity.py \
+python 10_plot_patients_activity_variation_tile13.py \
   --presence ../results/motif_grammar/tile13_site_presence_fixedbins.tsv \
   --counts   ../results/motif_grammar/tile13_site_combination_counts_fixedbins.tsv \
   --baseline ../data/activity/OL53_T_primaryT_activity.tsv \
+  --variation ../results/patients_variation/activity_vs_variance_activity_variation_metrics.tsv \
   --min-n 3 \
   --order-by baseline \
-  --baseline-only \
-  --outfig ../results/figures/tile13_grammar_activity_CD4_3iso
+  --baseline-and-variation \
+  --outfig ../results/figures/variation/tile13_grammar_activity_CD4_3iso
 """
 from __future__ import annotations
 import argparse
@@ -132,6 +133,7 @@ def load_presence_counts(presence_path: Path, counts_path: Path, min_n: int):
     return pres, cnts, order
 
 
+
 def load_activity(activity_path: Path):
     act = pd.read_csv(activity_path, sep="\t")
     # Filter to tile 13 only using the pattern :13:
@@ -139,6 +141,42 @@ def load_activity(activity_path: Path):
     act["isolate"] = act["ID"].map(extract_isolate_from_id)
     return act[["ID", "isolate", "log2FoldChange"]]
 
+# --- Variation loading helper (inserted after load_activity) ---
+def load_variation(variation_path: Path) -> pd.DataFrame:
+    """Load variation metrics for Tile 13 and return ID, isolate, sd_ftrend.
+
+    Accepts several possible column names and normalizes them to 'sd_ftrend':
+      - sd_ftrend_activity  (preferred, activity-based trend-adjusted SD)
+      - sd_ftrend
+      - sd_Fstat            (if you ever switch to F-stat-based metric)
+    """
+    var = pd.read_csv(variation_path, sep="\t")
+    # Filter to tile 13 only using the pattern :13:
+    var = var[var["ID"].astype(str).str.contains(r":13:")].copy()
+    var["isolate"] = var["ID"].map(extract_isolate_from_id)
+
+    # Try a few reasonable options for the variation column
+    # Prefer "sd_ftrend" over ctrl, then "sd_ftrend_ctrl"
+    candidate_cols = [
+        "sd_ftrend",
+        "sd_ftrend_ctrl",
+        "sd_Ftrend",
+        "sd_Ftrend_ctrl",
+        "sd_ftrend_activity",
+        "sd_Fstat",
+    ]
+    found = [c for c in candidate_cols if c in var.columns]
+
+    if not found:
+        raise ValueError(
+            "variation file must contain one of these columns: "
+            f"{candidate_cols}. Found: {list(var.columns)}"
+        )
+    # Pick the first matching candidate (prefer sd_ftrend, then ctrl, etc.)
+    chosen = found[0]
+    var = var.rename(columns={chosen: "sd_ftrend"})
+
+    return var[["ID", "isolate", "sd_ftrend"]]
 
 def collect_activity_by_signature(pres: pd.DataFrame, order: list[str], act: pd.DataFrame):
     # pres has one row per isolate with boolean columns and signature
@@ -146,6 +184,16 @@ def collect_activity_by_signature(pres: pd.DataFrame, order: list[str], act: pd.
     for sig in order:
         iso = pres.loc[pres["signature"] == sig, "isolate"].astype(str).tolist()
         vals = act.loc[act["isolate"].isin(iso), "log2FoldChange"].astype(float).dropna().values
+        data.append((sig, iso, vals))
+    return data
+
+# --- Variation by signature helper (inserted after collect_activity_by_signature) ---
+def collect_variation_by_signature(pres: pd.DataFrame, order: list[str], var: pd.DataFrame):
+    """Collect sd_ftrend values for each grammar signature."""
+    data = []
+    for sig in order:
+        iso = pres.loc[pres["signature"] == sig, "isolate"].astype(str).tolist()
+        vals = var.loc[var["isolate"].isin(iso), "sd_ftrend"].astype(float).dropna().values
         data.append((sig, iso, vals))
     return data
 
@@ -247,26 +295,41 @@ def plot_grammars_with_activity(
     base_path: Path,
     ifng_path: Path,
     clades_path: Path,
+    variation_path: Path | None,
     min_n: int,
     outprefix: Path,
     order_by: str = "baseline",
     baseline_only: bool = False,
+    baseline_and_variation: bool = False,
 ):
     pres, cnts, order = load_presence_counts(presence_path, counts_path, min_n)
     act_base = load_activity(base_path)
-    if not baseline_only:
+    # Only load IFNg when we actually plan to plot it
+    if not baseline_only and not baseline_and_variation:
         act_ifng = load_activity(ifng_path)
     else:
         act_ifng = None
+
+    # Load variation metrics if provided
+    if variation_path is not None:
+        var_df = load_variation(variation_path)
+    else:
+        var_df = None
 
     iso2clade = load_isolate_to_clade_map(clades_path)
 
     # Collect activity rows using initial order
     rows_base_o = collect_activity_by_signature(pres, order, act_base)
-    if not baseline_only and act_ifng is not None:
+    if act_ifng is not None:
         rows_ifng_o = collect_activity_by_signature(pres, order, act_ifng)
     else:
         rows_ifng_o = []
+
+    # Collect variation rows using initial order (if available)
+    if var_df is not None:
+        rows_var_o = collect_variation_by_signature(pres, order, var_df)
+    else:
+        rows_var_o = []
 
     # Choose which condition determines row ordering (by median, desc)
     order_src = order_by.lower().strip()
@@ -281,12 +344,17 @@ def plot_grammars_with_activity(
         med_list.append((sig, median_val))
     ordered_sigs = [sig for sig, _ in sorted(med_list, key=lambda x: (np.isnan(x[1]), -x[1] if not np.isnan(x[1]) else 0))]
 
-    # Build rows for both conditions in the chosen order
+    # Build rows for all conditions in the chosen order
     rows_base = collect_activity_by_signature(pres, ordered_sigs, act_base)
-    if not baseline_only and act_ifng is not None:
+    if not baseline_only and not baseline_and_variation and act_ifng is not None:
         rows_ifng = collect_activity_by_signature(pres, ordered_sigs, act_ifng)
     else:
         rows_ifng = []
+
+    if var_df is not None:
+        rows_var = collect_variation_by_signature(pres, ordered_sigs, var_df)
+    else:
+        rows_var = []
 
     # Use baseline rows to determine number of grammars
     n = len(rows_base)
@@ -294,21 +362,41 @@ def plot_grammars_with_activity(
         print("No grammar groups meet the minimum isolate threshold.")
         return
 
-    # Build figure: either 3 columns (baseline-only) or 4 columns (baseline + IFNg)
-    if baseline_only:
+    # Build figure layout depending on mode
+    if baseline_and_variation:
+        # pies, grammars, baseline activity, variation (sd_ftrend)
+        fig = plt.figure(figsize=(16, max(3.5, 0.6 * n)))
+        gs = fig.add_gridspec(
+            nrows=1,
+            ncols=4,
+            width_ratios=[0.95, 0.80, 3.0, 3.0],
+        )
+        axP = fig.add_subplot(gs[0, 0])  # pies axis (leftmost)
+        axG = fig.add_subplot(gs[0, 1])  # grammar glyphs + labels
+        axB = fig.add_subplot(gs[0, 2])  # baseline violins
+        axV = fig.add_subplot(gs[0, 3])  # variation violins (per grammar)
+        axT = None
+        axC = None
+        gs.update(wspace=0.08)
+    elif baseline_only:
         fig = plt.figure(figsize=(11, max(3.5, 0.6 * n)))
         gs = fig.add_gridspec(nrows=1, ncols=3, width_ratios=[0.95, 0.80, 3.0])
         axP = fig.add_subplot(gs[0, 0])  # pies axis (leftmost)
         axG = fig.add_subplot(gs[0, 1])  # grammar glyphs + labels
         axB = fig.add_subplot(gs[0, 2])
+        axV = None
         axT = None
+        axC = None
     else:
+        # pies, grammars, baseline, IFNg
         fig = plt.figure(figsize=(14, max(3.5, 0.6 * n)))
         gs = fig.add_gridspec(nrows=1, ncols=4, width_ratios=[0.95, 0.80, 3.0, 3.0])
         axP = fig.add_subplot(gs[0, 0])  # pies axis (leftmost)
         axG = fig.add_subplot(gs[0, 1])  # grammar glyphs + labels
         axB = fig.add_subplot(gs[0, 2])
         axT = fig.add_subplot(gs[0, 3])
+        axV = None
+        axC = None
         gs.update(wspace=0.08)
 
     # Prepare legend handles (figure-level legend placed in a clear area)
@@ -326,6 +414,8 @@ def plot_grammars_with_activity(
     axB.set_ylim(0.5, n + 0.5)
     if axT is not None:
         axT.set_ylim(0.5, n + 0.5)
+    if 'axV' in locals() and axV is not None:
+        axV.set_ylim(0.5, n + 0.5)
     # Match row ordering with other panels so pies move with row reordering
     axP.invert_yaxis()
 
@@ -378,6 +468,36 @@ def plot_grammars_with_activity(
         ax.add_patch(Rectangle((q25, i - 0.12), q75 - q25, 0.24, facecolor='#444444', alpha=0.25, edgecolor='none'))
         ax.vlines(q50, i - 0.3, i + 0.3, colors='#222222', linewidth=2.5)
 
+    def draw_vertical_violin(ax, pos, vals, color="#bbbbbb"):
+        """Vertical violin with a dark IQR box and median line."""
+        if vals.size == 0:
+            return
+        parts = ax.violinplot(
+            [vals],
+            positions=[pos],
+            vert=True,
+            showextrema=False,
+            widths=0.6,
+        )
+        for b in parts["bodies"]:
+            b.set_facecolor(color)
+            b.set_alpha(0.25)
+            b.set_edgecolor("#666666")
+        q25, q50, q75 = np.percentile(vals, [25, 50, 75])
+        # IQR box
+        ax.add_patch(
+            Rectangle(
+                (pos - 0.12, q25),
+                0.24,
+                q75 - q25,
+                facecolor="#444444",
+                alpha=0.25,
+                edgecolor="none",
+            )
+        )
+        # median line
+        ax.vlines(pos, q50, q50, colors="#222222", linewidth=2.5)
+
     # Baseline violins
     axB.set_yticks(y_positions)
     axB.set_yticklabels([])
@@ -389,7 +509,26 @@ def plot_grammars_with_activity(
     axB.set_xlabel('Baseline Activity (log2FC)', fontsize=12)
     axB.invert_yaxis()
 
-    if not baseline_only and axT is not None and rows_ifng:
+    # Variation violins (log10 sd_ftrend) when requested
+    if baseline_and_variation and axV is not None and rows_var:
+        axV.set_yticks(y_positions)
+        axV.set_yticklabels([])
+        for i, (_sig, _iso, vals_var) in enumerate(rows_var, start=1):
+            vals_var = np.asarray(vals_var, dtype=float)
+            vals_pos = vals_var[vals_var > 0]
+            if vals_pos.size == 0:
+                continue
+            vals_log = np.log10(vals_pos)
+            draw_simple_violin(axV, i, vals_log)
+        axV.tick_params(axis='both', labelsize=11)
+        for spine in ["top", "right"]:
+            axV.spines[spine].set_visible(False)
+        axV.set_xlabel('log10 patient variability (sd_ftrend)', fontsize=12)
+        axV.invert_yaxis()
+
+    # (No clade-wise variation violins panel in main figure for baseline_and_variation mode)
+
+    if not baseline_only and not baseline_and_variation and axT is not None and rows_ifng:
         # INFg violins
         axT.set_yticks(y_positions)
         axT.set_yticklabels([])
@@ -409,7 +548,7 @@ def plot_grammars_with_activity(
                frameon=False, fontsize=9, bbox_to_anchor=(0.7, 0.99))
 
     # Site-type legend (position depends on layout)
-    if baseline_only:
+    if baseline_only and not baseline_and_variation:
         # In 3-column layout, tuck it near the right edge of the baseline panel
         fig.legend(
             legend_handles,
@@ -420,7 +559,7 @@ def plot_grammars_with_activity(
             bbox_to_anchor=(0.98, 0.15),
         )
     else:
-        # In 4-column layout, keep it slightly inset from the right
+        # In 4-column layouts, keep it slightly inset from the right
         fig.legend(
             legend_handles,
             ["IRF_x2", "IRF_x3", "E2F", "SP/KLF"],
@@ -439,6 +578,98 @@ def plot_grammars_with_activity(
     plt.close(fig)
     print(f"Saved figure: {out_pdf}\nSaved figure: {out_png}")
 
+    # --- Standalone clade-only violin plot (for baseline_and_variation mode) ---
+    # Also export a TSV/CSV with raw sd_ftrend values per clade and an "all" column.
+    if baseline_and_variation and (var_df is not None):
+        # Build clade column
+        var_clade = var_df.copy()
+        var_clade["SuperClade"] = var_clade["isolate"].map(iso2clade).fillna("Other")
+        clades_present = [c for c in CLADE_ORDER if (var_clade["SuperClade"] == c).any()]
+        if clades_present:
+            # --- CSV with raw sd_ftrend per clade and an "all" column ---
+            clade_series = {}
+            for cl in clades_present:
+                vals_raw = (
+                    var_clade.loc[var_clade["SuperClade"] == cl, "sd_ftrend"]
+                    .astype(float)
+                    .dropna()
+                    .reset_index(drop=True)
+                )
+                clade_series[cl] = vals_raw
+
+            all_vals = (
+                var_clade["sd_ftrend"]
+                .astype(float)
+                .dropna()
+                .reset_index(drop=True)
+            )
+            clade_series["all"] = all_vals
+
+            max_len = max(len(s) for s in clade_series.values())
+            df_clades = pd.DataFrame(
+                {name: s.reindex(range(max_len)) for name, s in clade_series.items()}
+            )
+            clade_outprefix = Path(str(outprefix) + "_cladeVariationOnly")
+            out2_csv = Path(str(clade_outprefix) + "_sdFtrend_values.tsv")
+            df_clades.to_csv(out2_csv, sep="\t", index=False)
+
+            # --- TSV that MATCHES the violin plot: log10(sd_ftrend), sd_ftrend > 0 ---
+            clade_series_log = {}
+
+            for cl in clades_present:
+                vals_raw = (
+                    var_clade.loc[var_clade["SuperClade"] == cl, "sd_ftrend"]
+                    .astype(float)
+                    .dropna()
+                )
+                vals_pos = vals_raw[vals_raw > 0].reset_index(drop=True)
+                clade_series_log[cl] = np.log10(vals_pos)
+
+            all_vals_raw = var_clade["sd_ftrend"].astype(float).dropna()
+            all_vals_pos = all_vals_raw[all_vals_raw > 0].reset_index(drop=True)
+            clade_series_log["all"] = np.log10(all_vals_pos)
+
+            max_len_log = max(len(v) for v in clade_series_log.values())
+            df_clades_log = pd.DataFrame(
+                {k: pd.Series(v).reindex(range(max_len_log)) for k, v in clade_series_log.items()}
+            )
+
+            out2_csv_log = Path(str(clade_outprefix) + "_log10sdFtrend_values.tsv")
+            df_clades_log.to_csv(out2_csv_log, sep="\t", index=False)
+
+            print(f"Saved RAW sd_ftrend TSV: {out2_csv}")
+            print(f"Saved PLOT-MATCHING log10(sd_ftrend) TSV: {out2_csv_log}")
+
+            # --- Log10 sd_ftrend clade-only violin plot (as before) ---
+            positions = np.arange(1, len(clades_present) + 1)
+            fig2, ax2 = plt.subplots(figsize=(max(4.0, 0.8 * len(clades_present)), 4.5))
+            for pos, cl in zip(positions, clades_present):
+                vals = (
+                    var_clade.loc[var_clade["SuperClade"] == cl, "sd_ftrend"]
+                    .astype(float)
+                    .dropna()
+                    .values
+                )
+                vals = vals[vals > 0]
+                if vals.size == 0:
+                    continue
+                vals_log = np.log10(vals)
+                color = CLADE_COLORS.get(cl, "#bbbbbb")
+                draw_vertical_violin(ax2, pos, vals_log, color=color)
+            ax2.set_xticks(positions)
+            ax2.set_xticklabels(clades_present, rotation=45, ha="right", fontsize=9)
+            ax2.set_ylabel("log10 patient variability (sd_ftrend)", fontsize=12)
+            ax2.set_title("Variation by clade (Tile 13)", fontsize=12)
+            for spine in ["top", "right"]:
+                ax2.spines[spine].set_visible(False)
+            out2_pdf = Path(str(clade_outprefix) + ".pdf")
+            out2_png = Path(str(clade_outprefix) + ".png")
+            fig2.savefig(out2_pdf, bbox_inches="tight")
+            fig2.savefig(out2_png, dpi=300, bbox_inches="tight")
+            plt.close(fig2)
+            print(f"Saved clade-variation-only figure: {out2_pdf}\nSaved clade-variation-only figure: {out2_png}")
+            print(f"Saved clade-variation sd_ftrend table: {out2_csv}")
+
 
 def main():
     p = argparse.ArgumentParser(description='Plot activity violins per motif grammar with 4-slot grammar glyphs (Tile 13)')
@@ -447,24 +678,32 @@ def main():
     p.add_argument('--baseline', default='../data/activity/OL53_run_Jurkat_berkay_activity.tsv')
     p.add_argument('--ifng',     default='../data/activity/comparison_INFg_vs_Ctrl.tsv')
     p.add_argument('--clades',   default='../data/clades.tsv')
+    p.add_argument('--variation', default=None,
+                   help='TSV with per-tile variation metrics (must include ID and sd_ftrend).')
     p.add_argument('--min-n', type=int, default=10)
     p.add_argument('--order-by', choices=['baseline','ifng'], default='baseline', help='Order grammars by median activity of this condition')
     p.add_argument('--outfig', default='../results/figures/tile13_grammar_activity')
     p.add_argument('--baseline-only', action='store_true',
                    help='Plot only baseline violins (no IFNg panel).')
+    p.add_argument('--baseline-and-variation', action='store_true',
+                   help='Plot baseline violins and a patient-variation (sd_ftrend) panel (no IFNg panel).')
     args = p.parse_args()
 
     outprefix = Path(str(args.outfig) + f'_{args.order_by}Ordered')
+    variation_path = Path(args.variation) if args.variation is not None else None
+
     plot_grammars_with_activity(
         Path(args.presence),
         Path(args.counts),
         Path(args.baseline),
         Path(args.ifng),
         Path(args.clades),
+        variation_path,
         args.min_n,
         outprefix,
         args.order_by,
         baseline_only=args.baseline_only,
+        baseline_and_variation=args.baseline_and_variation,
     )
 
 

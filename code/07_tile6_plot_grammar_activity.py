@@ -37,6 +37,15 @@ python 07_tile6_plot_grammar_activity.py \
   --min-n 3 \
   --order-by stim \
   --outfig ../results/figures/tile6_grammar_activity_3iso
+
+python 07_tile6_plot_grammar_activity.py \
+  --presence ../results/motif_grammar/tile6_site_presence_fixedbins.tsv \
+  --counts   ../results/motif_grammar/tile6_site_combination_counts_fixedbins.tsv \
+  --baseline ../data/activity/OL53_T_primaryT_activity.tsv \
+  --min-n 3 \
+  --order-by baseline \
+  --baseline-only \
+  --outfig ../results/figures/tile6_grammar_activity_CD4_3iso
 """
 from __future__ import annotations
 import argparse
@@ -218,50 +227,87 @@ def draw_pie(ax, center_x: float, center_y: float, frac_by_clade: dict, radius: 
         start_angle += theta
 
 
-def plot_grammars_with_activity(presence_path: Path, counts_path: Path, base_path: Path, stim_path: Path, tnf_path: Path, clades_path: Path, min_n: int, outprefix: Path, order_by: str = "stim"):
+def plot_grammars_with_activity(
+    presence_path: Path,
+    counts_path: Path,
+    base_path: Path,
+    stim_path: Path,
+    tnf_path: Path,
+    clades_path: Path,
+    min_n: int,
+    outprefix: Path,
+    order_by: str = "stim",
+    baseline_only: bool = False,
+):
     pres, cnts, order = load_presence_counts(presence_path, counts_path, min_n)
-    act_stim = load_activity(stim_path)
-    act_tnf = load_activity(tnf_path)
     act_base = load_activity(base_path)
+    if not baseline_only:
+        act_stim = load_activity(stim_path)
+        act_tnf = load_activity(tnf_path)
+    else:
+        act_stim = None
+        act_tnf = None
 
     iso2clade = load_isolate_to_clade_map(clades_path)
 
     # Collect activity rows using initial order
     rows_base_o = collect_activity_by_signature(pres, order, act_base)
-    rows_stim_o = collect_activity_by_signature(pres, order, act_stim)
-    rows_tnf_o  = collect_activity_by_signature(pres, order, act_tnf)
+    if not baseline_only:
+        rows_stim_o = collect_activity_by_signature(pres, order, act_stim)
+        rows_tnf_o  = collect_activity_by_signature(pres, order, act_tnf)
+    else:
+        rows_stim_o = []
+        rows_tnf_o  = []
 
     # Choose which condition determines row ordering (by median, desc)
     order_src = order_by.lower().strip()
+    if baseline_only:
+        order_src = "baseline"
     if order_src not in {"stim", "baseline", "tnf"}:
         order_src = "stim"
-    rows_src = {"stim": rows_stim_o, "baseline": rows_base_o, "tnf": rows_tnf_o}[order_src]
+    rows_src_map = {"stim": rows_stim_o, "baseline": rows_base_o, "tnf": rows_tnf_o}
+    rows_src = rows_src_map[order_src]
     med_list = []
     for sig, _iso, vals in rows_src:
         median_val = float(np.median(vals)) if vals.size > 0 else np.nan
         med_list.append((sig, median_val))
     ordered_sigs = [sig for sig, _ in sorted(med_list, key=lambda x: (np.isnan(x[1]), -x[1] if not np.isnan(x[1]) else 0))]
 
-    # Build rows for all three conditions in the chosen order
+    # Build rows in the chosen order
     rows_base = collect_activity_by_signature(pres, ordered_sigs, act_base)
-    rows_stim = collect_activity_by_signature(pres, ordered_sigs, act_stim)
-    rows_tnf  = collect_activity_by_signature(pres, ordered_sigs, act_tnf)
+    if not baseline_only:
+        rows_stim = collect_activity_by_signature(pres, ordered_sigs, act_stim)
+        rows_tnf  = collect_activity_by_signature(pres, ordered_sigs, act_tnf)
+    else:
+        rows_stim = rows_base  # reuse for layout (same signatures/order)
+        rows_tnf  = []
 
-    n = len(rows_stim)
+    # Use rows_stim (or rows_base in baseline-only mode) to count grammars
+    grammar_rows = rows_stim if not baseline_only else rows_base
+    n = len(grammar_rows)
     if n == 0:
         print("No grammar groups meet the minimum isolate threshold.")
         return
 
-    # Build figure: five columns (leftmost: pies, then grammar rectangles, then three violin plots)
-    fig = plt.figure(figsize=(18, max(3.5, 0.6 * n)))
-    gs = fig.add_gridspec(nrows=1, ncols=5, width_ratios=[0.95, 0.95, 3.0, 3.0, 3.0])
-    axP = fig.add_subplot(gs[0, 0])  # pies axis (leftmost)
-    axG = fig.add_subplot(gs[0, 1])  # grammar glyphs + labels
-    axB = fig.add_subplot(gs[0, 2])
-    axS = fig.add_subplot(gs[0, 3])
-    axT = fig.add_subplot(gs[0, 4])
-    # Bring glyphs a touch closer to pies
-    gs.update(wspace=0.08)
+    if baseline_only:
+        # 3-column layout: pies, grammars, baseline violins
+        fig = plt.figure(figsize=(12, max(3.5, 0.6 * n)))
+        gs = fig.add_gridspec(nrows=1, ncols=3, width_ratios=[0.95, 0.95, 3.0])
+        axP = fig.add_subplot(gs[0, 0])  # pies axis (leftmost)
+        axG = fig.add_subplot(gs[0, 1])  # grammar glyphs + labels
+        axB = fig.add_subplot(gs[0, 2])
+        axS = None
+        axT = None
+    else:
+        # 5-column layout: pies, grammars, baseline, Stim, TNF
+        fig = plt.figure(figsize=(18, max(3.5, 0.6 * n)))
+        gs = fig.add_gridspec(nrows=1, ncols=5, width_ratios=[0.95, 0.95, 3.0, 3.0, 3.0])
+        axP = fig.add_subplot(gs[0, 0])  # pies axis (leftmost)
+        axG = fig.add_subplot(gs[0, 1])  # grammar glyphs + labels
+        axB = fig.add_subplot(gs[0, 2])
+        axS = fig.add_subplot(gs[0, 3])
+        axT = fig.add_subplot(gs[0, 4])
+        gs.update(wspace=0.08)  # Bring glyphs a touch closer to pies
 
     # Prepare legend handles (figure-level legend placed in a clear area)
     legend_handles = [
@@ -274,8 +320,10 @@ def plot_grammars_with_activity(presence_path: Path, counts_path: Path, base_pat
     axP.set_ylim(0.5, n + 0.5)
     axG.set_ylim(0.5, n + 0.5)
     axB.set_ylim(0.5, n + 0.5)
-    axS.set_ylim(0.5, n + 0.5)
-    axT.set_ylim(0.5, n + 0.5)
+    if axS is not None:
+        axS.set_ylim(0.5, n + 0.5)
+    if axT is not None:
+        axT.set_ylim(0.5, n + 0.5)
     # Match row ordering with other panels so pies move with row reordering
     axP.invert_yaxis()
 
@@ -292,7 +340,7 @@ def plot_grammars_with_activity(presence_path: Path, counts_path: Path, base_pat
     axG.set_xticks([])
     axG.set_yticks(y_positions)
     labels = []
-    for i, (sig, iso_list, vals) in enumerate(rows_stim, start=1):
+    for i, (sig, iso_list, vals) in enumerate(grammar_rows, start=1):
         # representative row from presence for drawing the sites
         pres_row = pres[pres["signature"] == sig].iloc[0]
         draw_grammar_rect(axG, i, pres_row, x0=0.0, width=7.0, height=0.8)
@@ -339,27 +387,29 @@ def plot_grammars_with_activity(presence_path: Path, counts_path: Path, base_pat
     axB.set_xlabel('Baseline Activity (log2FC)', fontsize=12)
     axB.invert_yaxis()
 
-    # Stim violins
-    axS.set_yticks(y_positions)
-    axS.set_yticklabels([])
-    for i, (_sig, _iso, vals_stim) in enumerate(rows_stim, start=1):
-        draw_simple_violin(axS, i, vals_stim)
-    axS.tick_params(axis='both', labelsize=11)
-    for spine in ["top", "right"]:
-        axS.spines[spine].set_visible(False)
-    axS.set_xlabel('PMA+αCD3 Delta Activity (log2FC)', fontsize=12)
-    axS.invert_yaxis()
+    if not baseline_only and axS is not None:
+        # Stim violins
+        axS.set_yticks(y_positions)
+        axS.set_yticklabels([])
+        for i, (_sig, _iso, vals_stim) in enumerate(rows_stim, start=1):
+            draw_simple_violin(axS, i, vals_stim)
+        axS.tick_params(axis='both', labelsize=11)
+        for spine in ["top", "right"]:
+            axS.spines[spine].set_visible(False)
+        axS.set_xlabel('PMA+αCD3 Delta Activity (log2FC)', fontsize=12)
+        axS.invert_yaxis()
 
-    # TNF violins
-    axT.set_yticks(y_positions)
-    axT.set_yticklabels([])
-    for i, (_sig, _iso, vals_tnf) in enumerate(rows_tnf, start=1):
-        draw_simple_violin(axT, i, vals_tnf)
-    axT.tick_params(axis='both', labelsize=11)
-    for spine in ["top", "right"]:
-        axT.spines[spine].set_visible(False)
-    axT.set_xlabel('TNF Delta Activity (log2FC)', fontsize=12)
-    axT.invert_yaxis()
+    if not baseline_only and axT is not None:
+        # TNF violins
+        axT.set_yticks(y_positions)
+        axT.set_yticklabels([])
+        for i, (_sig, _iso, vals_tnf) in enumerate(rows_tnf, start=1):
+            draw_simple_violin(axT, i, vals_tnf)
+        axT.tick_params(axis='both', labelsize=11)
+        for spine in ["top", "right"]:
+            axT.spines[spine].set_visible(False)
+        axT.set_xlabel('TNF Delta Activity (log2FC)', fontsize=12)
+        axT.invert_yaxis()
 
     # Clade legend (top-center)
     clade_handles = [Rectangle((0,0), 1, 1, facecolor=CLADE_COLORS[c], edgecolor=EDGE, linewidth=0.4)
@@ -368,9 +418,27 @@ def plot_grammars_with_activity(presence_path: Path, counts_path: Path, base_pat
     fig.legend(clade_handles, clade_labels, loc='upper center', ncol=len(CLADE_ORDER),
                frameon=False, fontsize=9, bbox_to_anchor=(0.5, 0.99))
 
-    # Site-type legend (bottom-right outside last panel)
-    fig.legend(legend_handles, ["NFKB/REL", "SP/KLF"], loc='lower right',
-               frameon=False, fontsize=10, bbox_to_anchor=(0.32, 0.85))
+    # Site-type legend (position depends on layout)
+    if baseline_only:
+        # In 3-column layout, tuck it near the right edge of the baseline panel
+        fig.legend(
+            legend_handles,
+            ["NFKB/REL", "SP/KLF"],
+            loc="lower right",
+            frameon=False,
+            fontsize=10,
+            bbox_to_anchor=(0.98, 0.15),
+        )
+    else:
+        # In 5-column layout, keep it slightly inset from the right
+        fig.legend(
+            legend_handles,
+            ["NFKB/REL", "SP/KLF"],
+            loc="lower right",
+            frameon=False,
+            fontsize=10,
+            bbox_to_anchor=(0.98, 0.15),
+        )
 
     fig.subplots_adjust(left=0.04, right=0.995, top=0.93, bottom=0.08)
 
@@ -393,10 +461,23 @@ def main():
     p.add_argument('--min-n', type=int, default=10)
     p.add_argument('--order-by', choices=['stim','baseline','tnf'], default='stim', help='Order grammars by median activity of this condition')
     p.add_argument('--outfig', default='../results/figures/tile6_grammar_activity')
+    p.add_argument('--baseline-only', action='store_true',
+                  help='Plot only baseline violins (no Stim/TNF panels).')
     args = p.parse_args()
 
     outprefix = Path(str(args.outfig) + f'_{args.order_by}Ordered')
-    plot_grammars_with_activity(Path(args.presence), Path(args.counts), Path(args.baseline), Path(args.stim), Path(args.tnf), Path(args.clades), args.min_n, outprefix, args.order_by)
+    plot_grammars_with_activity(
+        Path(args.presence),
+        Path(args.counts),
+        Path(args.baseline),
+        Path(args.stim),
+        Path(args.tnf),
+        Path(args.clades),
+        args.min_n,
+        outprefix,
+        args.order_by,
+        baseline_only=args.baseline_only,
+    )
 
 
 if __name__ == '__main__':

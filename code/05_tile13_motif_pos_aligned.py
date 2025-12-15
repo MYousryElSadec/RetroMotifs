@@ -33,6 +33,12 @@ Usage
         --bin    2 \
         [--counts] [--all-hits]
 
+        python 05_tile13_motif_pos_aligned.py \
+        --hits ../results/motif_counts_patients/tile_13.hits.tsv \
+        --outdir ../results/figures_patients/tile13_positions \
+        --bin 2
+
+
 Notes
 -----
 - Add `--counts` to plot raw counts instead of density.
@@ -376,7 +382,7 @@ def main():
     df = filter_tile13(df, keep_all_hits=args.all_hits)
 
     # Load per-isolate reference/query sequences for tile 13 and align
-    ref_path = Path("../data/ref_seqs.tsv")
+    ref_path = Path("../data/ref_seqs_all.tsv")
     ref_df = load_ref_seqs_for_tile(ref_path, tile_num=13)
     df_aln, axis_max = map_hits_to_reference(df, ref_df)
 

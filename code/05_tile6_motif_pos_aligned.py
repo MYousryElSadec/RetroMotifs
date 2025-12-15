@@ -17,9 +17,14 @@ Behavior:
 - Saves PDF and 300-dpi PNG.
 
 Usage:
-    python code/05_nfkb_sp.py \
-        --hits ../results/motif_counts/tile6.hits.tsv \
-        --outdir ../results/figures/tile6_positions \
+    python 05_tile6_motif_pos_aligned.py \
+        --hits ../results/motif_counts/tile_6.hits.tsv \
+        --outdir ../results/figures/tile_6_positions \
+        --bin 2
+
+    python 05_tile6_motif_pos_aligned.py \
+        --hits ../results/motif_counts_patients/tile_6.hits.tsv \
+        --outdir ../results/figures_patients/tile6_positions \
         --bin 2
 
 Notes:
@@ -378,7 +383,7 @@ def main():
     df = filter_tile6(df, keep_all_hits=args.all_hits)
 
     # Load per-isolate reference/query sequences for tile 6 and align
-    ref_path = Path("../data/ref_seqs.tsv")
+    ref_path = Path("../data/ref_seqs_all.tsv")
     ref_df = load_ref_seqs_for_tile(ref_path, tile_num=6)
     df_aln, axis_max = map_hits_to_reference(df, ref_df)
 

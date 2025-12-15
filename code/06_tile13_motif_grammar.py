@@ -24,6 +24,14 @@ Logic
 - Writes two TSVs:
     1) tile13_site_presence_fixedbins.tsv — per‑isolate presence matrix + per‑family bits + signature
     2) tile13_site_combination_counts_fixedbins.tsv — counts per signature
+
+python3 06_tile13_motif_grammar.py \
+  --aligned ../results/motif_counts/tile_13.hits.aligned.tsv \
+  --outdir ../results/motif_grammar
+    
+python3 06_tile13_motif_grammar.py \
+  --aligned ../results/motif_counts_patients/tile_13.hits.aligned.tsv \
+  --outdir ../results/motif_grammar_patients
 """
 from __future__ import annotations
 import argparse

@@ -38,12 +38,12 @@ Outputs
 CLI (common usage)
 ------------------
 python code/02_motif_scans.py \
-  --meme ../data/jaspar2024_human_core.meme \
-  --tfs  ../data/TFs.tsv \
+  --meme data/jaspar2024_human_core.meme \
+  --tfs  data/TFs.tsv \
   --tiles_dir results/tiles \
   --outdir results/motif_counts \
-  --precedence ../data/family_precedence.tsv \
-  --composites ../data/family_composites.tsv \
+  --precedence data/family_precedence.tsv \
+  --composites data/family_composites.tsv \
   --rel_score 0.92 \
   --nms_factor 1.0 \
   --tf_dedupe_bp 8 --tf_iou 0.5 --tf_shift_bp 1 \
