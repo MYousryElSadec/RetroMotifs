@@ -46,7 +46,49 @@ python 10_plot_patients_activity_variation_tile13.py \
   --order-by baseline \
   --baseline-and-variation \
   --outfig ../results/figures/variation/tile13_grammar_activity_CD4_3iso
+
+
+Paired SP/KLF on/off comparison (F-statistic variation):
+python 10_plot_patients_activity_variation_tile13.py \
+  --presence ../results/motif_grammar/tile13_site_presence_fixedbins.tsv \
+  --counts   ../results/motif_grammar/tile13_site_combination_counts_fixedbins.tsv \
+  --baseline ../data/activity/OL53_T_primaryT_activity.tsv \
+  --variation ../results/patients_variation/activity_vs_variance_activity_variation_metrics.tsv \
+  --variation-metric fstat \
+  --baseline-and-variation \
+  --pair-sp-only \
+  --pair-test brunnermunzel \
+  --min-n 3 \
+  --order-by baseline \
+  --outfig ../results/figures/variation/tile13_grammar_activity_CD4_pairs
+
+# Welch version:
+python 10_plot_patients_activity_variation_tile13.py \
+  --presence ../results/motif_grammar/tile13_site_presence_fixedbins.tsv \
+  --counts   ../results/motif_grammar/tile13_site_combination_counts_fixedbins.tsv \
+  --baseline ../data/activity/OL53_T_primaryT_activity.tsv \
+  --variation ../results/patients_variation/activity_vs_variance_activity_variation_metrics.tsv \
+  --variation-metric fstat \
+  --baseline-and-variation \
+  --pair-sp-only \
+  --pair-test welch \
+  --min-n 3 \
+  --order-by baseline \
+  --outfig ../results/figures/variation/tile13_grammar_activity_CD4_pairs_welch
+
+Global SP pooled comparison (2 violins; Brunner–Munzel):
+python 10_plot_patients_activity_variation_tile13.py \
+ --presence ../results/motif_grammar/tile13_site_presence_fixedbins.tsv \
+  --counts   ../results/motif_grammar/tile13_site_combination_counts_fixedbins.tsv \
+  --baseline ../data/activity/OL53_T_primaryT_activity.tsv \
+  --variation ../results/patients_variation/activity_vs_variance_activity_variation_metrics.tsv \
+  --min-n 3 \
+  --baseline-and-variation \
+  --variation-metric fstat \
+  --outfig ../results/figures/variation/tile13_grammar_activity_CD4_pairs
+# This also writes: *_SPglobal_<metric>.pdf/png
 """
+
 from __future__ import annotations
 import argparse
 from pathlib import Path
@@ -54,7 +96,12 @@ import re
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
+try:
+    from scipy import stats
+except Exception:  # pragma: no cover
+    stats = None
 from matplotlib.patches import Rectangle, Wedge
+
 
 # Colors
 COL_ABS  = "#eeeeee"
@@ -113,6 +160,36 @@ SLOT_PRIORITY = {
     4: ("SP/KLF",),
 }
 
+def pooled_variation_by_sp(
+    pres: pd.DataFrame,
+    var_df: pd.DataFrame,
+    metric: str = "sd_ftrend",
+) -> tuple[np.ndarray, np.ndarray]:
+    """Return (vals_sp_minus, vals_sp_plus) pooled across all configurations.
+
+    Pools per-isolate variation values based on whether the isolate's grammar has SP/KLF_site1.
+    """
+    metric = metric.lower().strip()
+    vcol = "sd_ftrend" if metric in {"sd", "sd_ftrend", "ftrend"} else "fstat"
+
+    # isolate -> has_sp (from presence table)
+    iso_sp = (
+        pres[["isolate", "SP/KLF_site1"]]
+        .dropna()
+        .drop_duplicates(subset=["isolate"], keep="last")
+        .rename(columns={"SP/KLF_site1": "has_sp"})
+    )
+    iso_sp["has_sp"] = iso_sp["has_sp"].astype(bool)
+
+    v = var_df[["isolate", vcol]].dropna().copy()
+    v[vcol] = v[vcol].astype(float)
+
+    merged = v.merge(iso_sp, on="isolate", how="inner")
+    vals_minus = merged.loc[~merged["has_sp"], vcol].to_numpy(dtype=float)
+    vals_plus = merged.loc[merged["has_sp"], vcol].to_numpy(dtype=float)
+
+    return vals_minus, vals_plus
+
 
 def extract_isolate_from_id(s: str) -> str:
     # ID looks like: HIV-1:REJO:6:+_Modified_MT929400.1 or similar
@@ -141,42 +218,71 @@ def load_activity(activity_path: Path):
     act["isolate"] = act["ID"].map(extract_isolate_from_id)
     return act[["ID", "isolate", "log2FoldChange"]]
 
-# --- Variation loading helper (inserted after load_activity) ---
-def load_variation(variation_path: Path) -> pd.DataFrame:
-    """Load variation metrics for Tile 13 and return ID, isolate, sd_ftrend.
 
-    Accepts several possible column names and normalizes them to 'sd_ftrend':
-      - sd_ftrend_activity  (preferred, activity-based trend-adjusted SD)
-      - sd_ftrend
-      - sd_Fstat            (if you ever switch to F-stat-based metric)
+# --- Variation loading helper (updated for F-stat support) ---
+def load_variation(variation_path: Path, metric: str = "sd_ftrend") -> pd.DataFrame:
+    """Load variation metrics for Tile 13 and return ID, isolate, and a chosen metric.
+
+    Parameters
+    ----------
+    variation_path:
+        TSV with per-tile variation metrics.
+    metric:
+        Which metric to use. Supported values:
+          - "sd_ftrend"  : trend-adjusted SD-style metric (legacy)
+          - "fstat"      : F-statistic style metric
+
+    Notes
+    -----
+    The function accepts several possible column spellings and normalizes them to:
+      - 'sd_ftrend' when metric == "sd_ftrend"
+      - 'fstat'     when metric == "fstat"
     """
     var = pd.read_csv(variation_path, sep="\t")
     # Filter to tile 13 only using the pattern :13:
     var = var[var["ID"].astype(str).str.contains(r":13:")].copy()
     var["isolate"] = var["ID"].map(extract_isolate_from_id)
 
-    # Try a few reasonable options for the variation column
-    # Prefer "sd_ftrend" over ctrl, then "sd_ftrend_ctrl"
-    candidate_cols = [
-        "sd_ftrend",
-        "sd_ftrend_ctrl",
-        "sd_Ftrend",
-        "sd_Ftrend_ctrl",
-        "sd_ftrend_activity",
-        "sd_Fstat",
-    ]
-    found = [c for c in candidate_cols if c in var.columns]
+    metric = metric.lower().strip()
+    if metric in {"sd", "sd_ftrend", "ftrend", "sd_ftrend_activity"}:
+        candidate_cols = [
+            "sd_ftrend",
+            "sd_ftrend_ctrl",
+            "sd_Ftrend",
+            "sd_Ftrend_ctrl",
+            "sd_ftrend_activity",
+        ]
+        found = [c for c in candidate_cols if c in var.columns]
+        if not found:
+            raise ValueError(
+                "variation file must contain one of these sd_ftrend columns: "
+                f"{candidate_cols}. Found: {list(var.columns)}"
+            )
+        chosen = found[0]
+        var = var.rename(columns={chosen: "sd_ftrend"})
+        return var[["ID", "isolate", "sd_ftrend"]]
 
-    if not found:
-        raise ValueError(
-            "variation file must contain one of these columns: "
-            f"{candidate_cols}. Found: {list(var.columns)}"
-        )
-    # Pick the first matching candidate (prefer sd_ftrend, then ctrl, etc.)
-    chosen = found[0]
-    var = var.rename(columns={chosen: "sd_ftrend"})
+    if metric in {"fstat", "f", "f_stat", "f_statistic"}:
+        candidate_cols = [
+            "fstat",
+            "Fstat",
+            "F_stat",
+            "F_statistic",
+            "f_stat",
+            "f_statistic",
+            "sd_Fstat",  # legacy name sometimes used
+        ]
+        found = [c for c in candidate_cols if c in var.columns]
+        if not found:
+            raise ValueError(
+                "variation file must contain one of these F-stat columns: "
+                f"{candidate_cols}. Found: {list(var.columns)}"
+            )
+        chosen = found[0]
+        var = var.rename(columns={chosen: "fstat"})
+        return var[["ID", "isolate", "fstat"]]
 
-    return var[["ID", "isolate", "sd_ftrend"]]
+    raise ValueError(f"Unknown variation metric: {metric}. Use 'sd_ftrend' or 'fstat'.")
 
 def collect_activity_by_signature(pres: pd.DataFrame, order: list[str], act: pd.DataFrame):
     # pres has one row per isolate with boolean columns and signature
@@ -187,15 +293,145 @@ def collect_activity_by_signature(pres: pd.DataFrame, order: list[str], act: pd.
         data.append((sig, iso, vals))
     return data
 
-# --- Variation by signature helper (inserted after collect_activity_by_signature) ---
-def collect_variation_by_signature(pres: pd.DataFrame, order: list[str], var: pd.DataFrame):
-    """Collect sd_ftrend values for each grammar signature."""
+
+# --- Variation by signature helper (with metric support) ---
+def collect_variation_by_signature(
+    pres: pd.DataFrame,
+    order: list[str],
+    var: pd.DataFrame,
+    metric: str = "sd_ftrend",
+):
+    """Collect variation values for each grammar signature.
+
+    Expects var to contain either 'sd_ftrend' or 'fstat' depending on metric.
+    """
+    metric = metric.lower().strip()
+    col = "sd_ftrend" if metric in {"sd", "sd_ftrend", "ftrend"} else "fstat"
+
     data = []
     for sig in order:
         iso = pres.loc[pres["signature"] == sig, "isolate"].astype(str).tolist()
-        vals = var.loc[var["isolate"].isin(iso), "sd_ftrend"].astype(float).dropna().values
+        vals = var.loc[var["isolate"].isin(iso), col].astype(float).dropna().values
         data.append((sig, iso, vals))
     return data
+
+
+def _slot_family(pres_row: pd.Series, slot_idx_1based: int) -> str | None:
+    """Return the chosen family for a given slot according to SLOT_PRIORITY.
+
+    For mutually-exclusive slots, we resolve ties using SLOT_PRIORITY.
+    Returns one of: 'IRF_x2', 'IRF_x3', 'E2F', 'SP/KLF', or None.
+    """
+    site_names = FOUR_SLOTS[slot_idx_1based - 1]
+    present_fams = []
+    for sname in site_names:
+        if bool(pres_row.get(sname, False)):
+            fam = sname.split("_site")[0]
+            present_fams.append(fam)
+    if not present_fams:
+        return None
+    pri = SLOT_PRIORITY.get(slot_idx_1based, ())
+    for fam in pri:
+        if fam in present_fams:
+            return fam
+    return present_fams[0]
+
+
+def _arch_key_no_sp(pres_row: pd.Series) -> tuple:
+    """Architecture key excluding SP/KLF slot (slot 4).
+
+    We key by the *displayed* 4-slot grammar representation for slots 1-3:
+      - slot1 family (IRF_x2 vs E2F vs None)
+      - slot2 family (IRF_x3 vs IRF_x2 vs None)
+      - slot3 presence (E2F vs None)
+
+    This avoids incorrect pairing when raw booleans differ but the resolved
+    slot representation is the same (or vice versa).
+    """
+    s1 = _slot_family(pres_row, 1)
+    s2 = _slot_family(pres_row, 2)
+    s3 = _slot_family(pres_row, 3)  # E2F or None
+    return (s1, s2, s3)
+
+
+def build_sp_pairs(pres: pd.DataFrame, signatures: list[str]) -> list[tuple[str, str]]:
+    """Return list of (sig_no_sp, sig_with_sp) pairs.
+
+    Only includes architectures that have exactly one signature with SP/KLF_site1==False
+    and one with SP/KLF_site1==True.
+    """
+    # one representative row per signature
+    rep = pres[pres["signature"].isin(signatures)].groupby("signature", as_index=False).head(1)
+
+    by_key: dict[tuple, dict[bool, str]] = {}
+    for _i, r in rep.iterrows():
+        sig = str(r["signature"])
+        key = _arch_key_no_sp(r)
+        has_sp = bool(r.get("SP/KLF_site1", False))
+        by_key.setdefault(key, {})[has_sp] = sig
+
+    pairs = []
+    for _key, d in by_key.items():
+        if (False in d) and (True in d):
+            pairs.append((d[False], d[True]))
+    return pairs
+
+
+def cliffs_delta(x: np.ndarray, y: np.ndarray) -> float:
+    """Cliff's delta effect size (x vs y). Range [-1, 1]."""
+    x = np.asarray(x)
+    y = np.asarray(y)
+    if x.size == 0 or y.size == 0:
+        return np.nan
+    # O(n*m) but small groups here.
+    gt = 0
+    lt = 0
+    for xi in x:
+        gt += np.sum(xi > y)
+        lt += np.sum(xi < y)
+    return float((gt - lt) / (x.size * y.size))
+
+
+def compare_two_distributions(
+    x: np.ndarray,
+    y: np.ndarray,
+    test: str = "brunnermunzel",
+    log_transform_for_t: bool = True,
+) -> tuple[float, float]:
+    """Return (statistic, pvalue) for a two-sided comparison.
+
+    Supported tests:
+      - brunnermunzel (default)
+      - mannwhitney
+      - welch  (Welch's t-test; unequal variances). For positive-valued metrics,
+               we recommend running Welch on log10(metric) to reduce skew.
+    """
+    test = test.lower().strip()
+    if stats is None:
+        raise RuntimeError("scipy is required for statistical tests (install scipy)")
+
+    x = np.asarray(x, dtype=float)
+    y = np.asarray(y, dtype=float)
+    x = x[np.isfinite(x)]
+    y = y[np.isfinite(y)]
+
+    if test in {"brunnermunzel", "bm", "brunner-munzel"}:
+        res = stats.brunnermunzel(x, y, alternative="two-sided")
+        return float(res.statistic), float(res.pvalue)
+
+    if test in {"welch", "ttest", "t", "welch-t", "welch_t"}:
+        xx = x
+        yy = y
+        if log_transform_for_t:
+            # Only defined for positive values; caller should already filter >0.
+            xx = np.log10(xx)
+            yy = np.log10(yy)
+        res = stats.ttest_ind(xx, yy, equal_var=False, alternative="two-sided")
+        return float(res.statistic), float(res.pvalue)
+
+    # Mann-Whitney U (two-sided)
+    res = stats.mannwhitneyu(x, y, alternative="two-sided")
+    return float(res.statistic), float(res.pvalue)
 
 
 def load_isolate_to_clade_map(path: Path) -> dict:
@@ -301,6 +537,9 @@ def plot_grammars_with_activity(
     order_by: str = "baseline",
     baseline_only: bool = False,
     baseline_and_variation: bool = False,
+    variation_metric: str = "sd_ftrend",
+    pair_sp_only: bool = False,
+    pair_test: str = "brunnermunzel",
 ):
     pres, cnts, order = load_presence_counts(presence_path, counts_path, min_n)
     act_base = load_activity(base_path)
@@ -312,7 +551,7 @@ def plot_grammars_with_activity(
 
     # Load variation metrics if provided
     if variation_path is not None:
-        var_df = load_variation(variation_path)
+        var_df = load_variation(variation_path, metric=variation_metric)
     else:
         var_df = None
 
@@ -327,7 +566,7 @@ def plot_grammars_with_activity(
 
     # Collect variation rows using initial order (if available)
     if var_df is not None:
-        rows_var_o = collect_variation_by_signature(pres, order, var_df)
+        rows_var_o = collect_variation_by_signature(pres, order, var_df, metric=variation_metric)
     else:
         rows_var_o = []
 
@@ -337,12 +576,79 @@ def plot_grammars_with_activity(
         order_src = "baseline"
     if order_src not in {"baseline", "ifng"}:
         order_src = "baseline"
-    rows_src = {"baseline": rows_base_o, "ifng": rows_ifng_o}[order_src]
-    med_list = []
-    for sig, _iso, vals in rows_src:
-        median_val = float(np.median(vals)) if vals.size > 0 else np.nan
-        med_list.append((sig, median_val))
-    ordered_sigs = [sig for sig, _ in sorted(med_list, key=lambda x: (np.isnan(x[1]), -x[1] if not np.isnan(x[1]) else 0))]
+
+    # Optional: restrict to matched SP/KLF on/off pairs (architecture identical except SP/KLF_site1)
+    # Optional: group matched SP/KLF on/off pairs (architecture identical except SP/KLF_site1)
+    if pair_sp_only:
+        pairs = build_sp_pairs(pres, order)
+        in_pair = {s for a, b in pairs for s in (a, b)}
+
+        # Baseline median per signature for scoring
+        base_by_sig = {sig: vals for sig, _iso, vals in rows_base_o}
+        med_base = {
+            sig: (float(np.median(base_by_sig.get(sig, np.array([]))))
+                if base_by_sig.get(sig, np.array([])).size > 0 else np.nan)
+            for sig in order
+        }
+
+        # Each pair is one sortable entity (score = max of medians)
+        # Each unpaired signature is its own entity (score = its median)
+        entities: list[tuple[str, float, tuple[str, ...]]] = []
+
+        for sig_no, sig_yes in pairs:
+            m1 = med_base.get(sig_no, np.nan)
+            m2 = med_base.get(sig_yes, np.nan)
+            # Pair score: max baseline median across the two (ignoring NaNs)
+            if np.isnan(m1) and np.isnan(m2):
+                score = np.nan
+            elif np.isnan(m1):
+                score = float(m2)
+            elif np.isnan(m2):
+                score = float(m1)
+            else:
+                score = float(max(m1, m2))
+            entities.append((f"PAIR::{sig_no}::{sig_yes}", score, (sig_no, sig_yes)))
+
+        for sig in order:
+            if sig in in_pair:
+                continue
+            entities.append((f"SIG::{sig}", med_base.get(sig, np.nan), (sig,)))
+
+        # Sort entities by score desc; NaNs at bottom
+        entities.sort(key=lambda x: (np.isnan(x[1]), -x[1] if not np.isnan(x[1]) else 0))
+
+        # Expand entities into final signature order; keep pair members adjacent (SP+ then SP-); avoid duplicates
+        ordered_sigs = []
+        seen = set()
+        for _eid, _score, members in entities:
+            if len(members) == 2:
+                # members are (sig_no_sp, sig_with_sp)
+                sig_no, sig_yes = members
+                # We want SP+ first, then SP-
+                for s in (sig_yes, sig_no):
+                    if s not in seen:
+                        ordered_sigs.append(s)
+                        seen.add(s)
+            else:
+                s = members[0]
+                if s not in seen:
+                    ordered_sigs.append(s)
+                    seen.add(s)
+
+
+    else:
+        rows_src = {"baseline": rows_base_o, "ifng": rows_ifng_o}[order_src]
+        med_list = []
+        for sig, _iso, vals in rows_src:
+            median_val = float(np.median(vals)) if vals.size > 0 else np.nan
+            med_list.append((sig, median_val))
+        ordered_sigs = [
+            sig
+            for sig, _ in sorted(
+                med_list,
+                key=lambda x: (np.isnan(x[1]), -x[1] if not np.isnan(x[1]) else 0),
+            )
+        ]
 
     # Build rows for all conditions in the chosen order
     rows_base = collect_activity_by_signature(pres, ordered_sigs, act_base)
@@ -352,7 +658,7 @@ def plot_grammars_with_activity(
         rows_ifng = []
 
     if var_df is not None:
-        rows_var = collect_variation_by_signature(pres, ordered_sigs, var_df)
+        rows_var = collect_variation_by_signature(pres, ordered_sigs, var_df, metric=variation_metric)
     else:
         rows_var = []
 
@@ -437,7 +743,11 @@ def plot_grammars_with_activity(
         pres_row = pres[pres["signature"] == sig].iloc[0]
         draw_grammar_rect(axG, i, pres_row, x0=0.0, width=4.0, height=0.8)
         count = len(iso_list)
-        labels.append(f"n={count}")
+        sp_flag = "SP+" if bool(pres_row.get("SP/KLF_site1", False)) else "SP-"
+        if pair_sp_only:
+            labels.append(f"{sp_flag}  n={count}")
+        else:
+            labels.append(f"n={count}")
         # pie: fraction of clades among isolates in this grammar (drawn on axP)
         clade_counts = {c: 0 for c in CLADE_ORDER}
         for iso in iso_list:
@@ -482,7 +792,8 @@ def plot_grammars_with_activity(
         for b in parts["bodies"]:
             b.set_facecolor(color)
             b.set_alpha(0.25)
-            b.set_edgecolor("#666666")
+            b.set_edgecolor("#444444")
+            b.set_linewidth(1.2)
         q25, q50, q75 = np.percentile(vals, [25, 50, 75])
         # IQR box
         ax.add_patch(
@@ -495,8 +806,8 @@ def plot_grammars_with_activity(
                 edgecolor="none",
             )
         )
-        # median line
-        ax.vlines(pos, q50, q50, colors="#222222", linewidth=2.5)
+        # median line (horizontal across the violin)
+        ax.hlines(q50, pos - 0.18, pos + 0.18, colors="#222222", linewidth=2.5)
 
     # Baseline violins
     axB.set_yticks(y_positions)
@@ -509,10 +820,13 @@ def plot_grammars_with_activity(
     axB.set_xlabel('Baseline Activity (log2FC)', fontsize=12)
     axB.invert_yaxis()
 
-    # Variation violins (log10 sd_ftrend) when requested
+    # Variation violins when requested (log10(metric), metric > 0)
     if baseline_and_variation and axV is not None and rows_var:
         axV.set_yticks(y_positions)
         axV.set_yticklabels([])
+
+        metric_label = "sd_ftrend" if variation_metric.lower().strip() in {"sd", "sd_ftrend", "ftrend"} else "F-stat"
+
         for i, (_sig, _iso, vals_var) in enumerate(rows_var, start=1):
             vals_var = np.asarray(vals_var, dtype=float)
             vals_pos = vals_var[vals_var > 0]
@@ -520,11 +834,72 @@ def plot_grammars_with_activity(
                 continue
             vals_log = np.log10(vals_pos)
             draw_simple_violin(axV, i, vals_log)
-        axV.tick_params(axis='both', labelsize=11)
+
+        axV.tick_params(axis="both", labelsize=11)
         for spine in ["top", "right"]:
             axV.spines[spine].set_visible(False)
-        axV.set_xlabel('log10 patient variability (sd_ftrend)', fontsize=12)
+        axV.set_xlabel(f"log10 patient variability ({metric_label})", fontsize=12)
         axV.invert_yaxis()
+
+    # Per-pair statistical tests: compare SP- vs SP+ within each matched architecture
+    if baseline_and_variation and pair_sp_only and axV is not None and var_df is not None and rows_var:
+        # signature -> plotted row index (1-based)
+        sig_to_row = {sig: i for i, (sig, _iso, _vals) in enumerate(rows_var, start=1)}
+        # signature -> raw metric values (not log-transformed)
+        var_lookup = {sig: np.asarray(vals, dtype=float) for sig, _iso, vals in rows_var}
+
+        # Determine the matched SP- vs SP+ pairs from the underlying presence table
+        pairs = build_sp_pairs(pres, ordered_sigs)
+
+        # Place the text near the right side of the variation panel.
+        x0, x1 = axV.get_xlim()
+        x_text = x1 - 0.02 * (x1 - x0)
+        x_br = x1 - 0.06 * (x1 - x0)
+        tick = 0.01 * (x1 - x0)
+
+        for sig_no, sig_yes in pairs:
+            if sig_no not in sig_to_row or sig_yes not in sig_to_row:
+                continue
+            r1 = sig_to_row[sig_no]
+            r2 = sig_to_row[sig_yes]
+            # ensure r1 is the top row (smaller index after invert_yaxis)
+            y_top = min(r1, r2)
+            y_bot = max(r1, r2)
+            y_center = (y_top + y_bot) / 2.0
+
+            x = var_lookup.get(sig_no, np.array([]))
+            y = var_lookup.get(sig_yes, np.array([]))
+            x = x[np.isfinite(x) & (x > 0)]
+            y = y[np.isfinite(y) & (y > 0)]
+            if x.size == 0 or y.size == 0:
+                continue
+
+            # For Welch t-test, use log10(metric) (caller filters metric>0).
+            stat, pval = compare_two_distributions(
+                x,
+                y,
+                test=pair_test,
+                log_transform_for_t=True,
+            )
+            delta = cliffs_delta(y, x)  # positive => SP+ tends higher
+
+
+            # p-value formatting: always show numeric value
+            # Use scientific notation for very small p-values.
+            if pval < 1e-3:
+                ptxt = f"p={pval:.2e}"
+            else:
+                ptxt = f"p={pval:.4f}".rstrip("0").rstrip(".")
+
+            axV.text(
+                x_text,
+                y_center,
+                f"{ptxt}  Δ={delta:.2f}",
+                ha="right",
+                va="center",
+                fontsize=9,
+                color="#222222",
+            )
 
     # (No clade-wise variation violins panel in main figure for baseline_and_variation mode)
 
@@ -547,27 +922,25 @@ def plot_grammars_with_activity(
     fig.legend(clade_handles, clade_labels, loc='upper center', ncol=len(CLADE_ORDER),
                frameon=False, fontsize=9, bbox_to_anchor=(0.7, 0.99))
 
-    # Site-type legend (position depends on layout)
-    if baseline_only and not baseline_and_variation:
-        # In 3-column layout, tuck it near the right edge of the baseline panel
-        fig.legend(
-            legend_handles,
-            ["IRF_x2", "IRF_x3", "E2F", "SP/KLF"],
-            loc="lower right",
-            frameon=False,
-            fontsize=10,
-            bbox_to_anchor=(0.98, 0.15),
-        )
+    # Site-type legend: place on the right-most panel using automatic positioning
+    # to minimize overlap with plotted data.
+    site_labels = ["IRF_x2", "IRF_x3", "E2F", "SP/KLF"]
+
+    # Choose the most appropriate axis to host the legend
+    if baseline_and_variation and axV is not None:
+        legend_ax = axV
+    elif (not baseline_only) and (axT is not None):
+        legend_ax = axT
     else:
-        # In 4-column layouts, keep it slightly inset from the right
-        fig.legend(
-            legend_handles,
-            ["IRF_x2", "IRF_x3", "E2F", "SP/KLF"],
-            loc="lower right",
-            frameon=False,
-            fontsize=10,
-            bbox_to_anchor=(0.98, 0.15),
-        )
+        legend_ax = axB
+
+    legend_ax.legend(
+        legend_handles,
+        site_labels,
+        loc="best",
+        frameon=False,
+        fontsize=10,
+    )
 
     fig.subplots_adjust(left=0.04, right=0.995, top=0.93, bottom=0.08)
 
@@ -578,19 +951,84 @@ def plot_grammars_with_activity(
     plt.close(fig)
     print(f"Saved figure: {out_pdf}\nSaved figure: {out_png}")
 
+    # --- Global SP/KLF pooled comparison (2 violins) ---
+    if baseline_and_variation and (var_df is not None):
+        vmetric = "sd_ftrend" if variation_metric.lower().strip() in {"sd", "sd_ftrend", "ftrend"} else "fstat"
+        sp_minus, sp_plus = pooled_variation_by_sp(pres, var_df, metric=variation_metric)
+
+        # Filter to positive values for log10 plotting (and for the test; monotone transform doesn't change ranks)
+        sp_minus = sp_minus[np.isfinite(sp_minus) & (sp_minus > 0)]
+        sp_plus = sp_plus[np.isfinite(sp_plus) & (sp_plus > 0)]
+
+        # Save log10(metric) values to match the plotted scale
+        out3_prefix = Path(str(outprefix) + f"_SPglobal_{vmetric}")
+        out3_vals_csv = Path(str(out3_prefix) + "_values.csv")
+        sp_plus_log_csv = np.log10(sp_plus)
+        sp_minus_log_csv = np.log10(sp_minus)
+        max_len = int(max(sp_plus_log_csv.size, sp_minus_log_csv.size))
+        df_sp = pd.DataFrame({
+            "SP_plus": pd.Series(sp_plus_log_csv).reindex(range(max_len)),
+            "SP_minus": pd.Series(sp_minus_log_csv).reindex(range(max_len)),
+        })
+        df_sp.to_csv(out3_vals_csv, index=False)
+        print(f"Saved global SP pooled values CSV (log10 scale): {out3_vals_csv}")
+
+        if (sp_minus.size > 0) and (sp_plus.size > 0):
+            # Brunner–Munzel (two-sided)
+            stat, pval = compare_two_distributions(sp_minus, sp_plus, test="brunnermunzel")
+            delta = cliffs_delta(sp_plus, sp_minus)  # positive => SP+ tends higher
+
+            # Plot on log10 scale for readability
+            sp_minus_log = np.log10(sp_minus)
+            sp_plus_log = np.log10(sp_plus)
+
+            fig3, ax3 = plt.subplots(figsize=(2.8, 4.8))
+            draw_vertical_violin(ax3, 1, sp_plus_log, color=FAMILY_COLORS.get("SP/KLF", "#bbbbbb"))
+            draw_vertical_violin(ax3, 2, sp_minus_log, color="#f2f2f2")
+
+            ax3.set_xticks([1, 2])
+            ax3.set_xticklabels([
+                f"SP+ (n={sp_plus.size})",
+                f"SP- (n={sp_minus.size})",
+            ], fontsize=10)
+
+            # Tighten x-limits and margins to emphasize thin width.
+            ax3.set_xlim(0.5, 2.5)
+            fig3.subplots_adjust(left=0.28, right=0.98, top=0.88, bottom=0.18)
+
+            # Exact p-value formatting
+            if pval < 1e-3:
+                ptxt = f"p={pval:.2e}"
+            else:
+                ptxt = f"p={pval:.4f}".rstrip("0").rstrip(".")
+
+            ax3.set_ylabel(f"log10 patient variability ({vmetric})", fontsize=12)
+            ax3.set_title(f"Global SP/KLF effect (Brunner–Munzel)\n{ptxt}  Δ={delta:.2f}", fontsize=11)
+
+            for spine in ["top", "right"]:
+                ax3.spines[spine].set_visible(False)
+
+            out3_pdf = Path(str(out3_prefix) + ".pdf")
+            out3_png = Path(str(out3_prefix) + ".png")
+            fig3.savefig(out3_pdf, bbox_inches="tight")
+            fig3.savefig(out3_png, dpi=300, bbox_inches="tight")
+            plt.close(fig3)
+            print(f"Saved global SP pooled figure: {out3_pdf}\nSaved global SP pooled figure: {out3_png}")
+
     # --- Standalone clade-only violin plot (for baseline_and_variation mode) ---
-    # Also export a TSV/CSV with raw sd_ftrend values per clade and an "all" column.
+    # Also export a TSV/CSV with raw sd_ftrend/fstat values per clade and an "all" column.
     if baseline_and_variation and (var_df is not None):
         # Build clade column
         var_clade = var_df.copy()
+        vmetric = "sd_ftrend" if variation_metric.lower().strip() in {"sd", "sd_ftrend", "ftrend"} else "fstat"
         var_clade["SuperClade"] = var_clade["isolate"].map(iso2clade).fillna("Other")
         clades_present = [c for c in CLADE_ORDER if (var_clade["SuperClade"] == c).any()]
         if clades_present:
-            # --- CSV with raw sd_ftrend per clade and an "all" column ---
+            # --- CSV with raw vmetric per clade and an "all" column ---
             clade_series = {}
             for cl in clades_present:
                 vals_raw = (
-                    var_clade.loc[var_clade["SuperClade"] == cl, "sd_ftrend"]
+                    var_clade.loc[var_clade["SuperClade"] == cl, vmetric]
                     .astype(float)
                     .dropna()
                     .reset_index(drop=True)
@@ -598,7 +1036,7 @@ def plot_grammars_with_activity(
                 clade_series[cl] = vals_raw
 
             all_vals = (
-                var_clade["sd_ftrend"]
+                var_clade[vmetric]
                 .astype(float)
                 .dropna()
                 .reset_index(drop=True)
@@ -609,23 +1047,23 @@ def plot_grammars_with_activity(
             df_clades = pd.DataFrame(
                 {name: s.reindex(range(max_len)) for name, s in clade_series.items()}
             )
-            clade_outprefix = Path(str(outprefix) + "_cladeVariationOnly")
-            out2_csv = Path(str(clade_outprefix) + "_sdFtrend_values.tsv")
+            clade_outprefix = Path(str(outprefix) + f"_cladeVariationOnly_{vmetric}")
+            out2_csv = Path(str(clade_outprefix) + f"_{vmetric}_values.tsv")
             df_clades.to_csv(out2_csv, sep="\t", index=False)
 
-            # --- TSV that MATCHES the violin plot: log10(sd_ftrend), sd_ftrend > 0 ---
+            # --- TSV that MATCHES the violin plot: log10(vmetric), vmetric > 0 ---
             clade_series_log = {}
 
             for cl in clades_present:
                 vals_raw = (
-                    var_clade.loc[var_clade["SuperClade"] == cl, "sd_ftrend"]
+                    var_clade.loc[var_clade["SuperClade"] == cl, vmetric]
                     .astype(float)
                     .dropna()
                 )
                 vals_pos = vals_raw[vals_raw > 0].reset_index(drop=True)
                 clade_series_log[cl] = np.log10(vals_pos)
 
-            all_vals_raw = var_clade["sd_ftrend"].astype(float).dropna()
+            all_vals_raw = var_clade[vmetric].astype(float).dropna()
             all_vals_pos = all_vals_raw[all_vals_raw > 0].reset_index(drop=True)
             clade_series_log["all"] = np.log10(all_vals_pos)
 
@@ -634,18 +1072,18 @@ def plot_grammars_with_activity(
                 {k: pd.Series(v).reindex(range(max_len_log)) for k, v in clade_series_log.items()}
             )
 
-            out2_csv_log = Path(str(clade_outprefix) + "_log10sdFtrend_values.tsv")
+            out2_csv_log = Path(str(clade_outprefix) + f"_log10{vmetric}_values.tsv")
             df_clades_log.to_csv(out2_csv_log, sep="\t", index=False)
 
-            print(f"Saved RAW sd_ftrend TSV: {out2_csv}")
-            print(f"Saved PLOT-MATCHING log10(sd_ftrend) TSV: {out2_csv_log}")
+            print(f"Saved RAW {vmetric} TSV: {out2_csv}")
+            print(f"Saved PLOT-MATCHING log10({vmetric}) TSV: {out2_csv_log}")
 
-            # --- Log10 sd_ftrend clade-only violin plot (as before) ---
+            # --- Log10 vmetric clade-only violin plot (as before) ---
             positions = np.arange(1, len(clades_present) + 1)
             fig2, ax2 = plt.subplots(figsize=(max(4.0, 0.8 * len(clades_present)), 4.5))
             for pos, cl in zip(positions, clades_present):
                 vals = (
-                    var_clade.loc[var_clade["SuperClade"] == cl, "sd_ftrend"]
+                    var_clade.loc[var_clade["SuperClade"] == cl, vmetric]
                     .astype(float)
                     .dropna()
                     .values
@@ -658,8 +1096,8 @@ def plot_grammars_with_activity(
                 draw_vertical_violin(ax2, pos, vals_log, color=color)
             ax2.set_xticks(positions)
             ax2.set_xticklabels(clades_present, rotation=45, ha="right", fontsize=9)
-            ax2.set_ylabel("log10 patient variability (sd_ftrend)", fontsize=12)
-            ax2.set_title("Variation by clade (Tile 13)", fontsize=12)
+            ax2.set_ylabel(f"log10 patient variability ({vmetric})", fontsize=12)
+            ax2.set_title(f"Variation by clade (Tile 13 — {vmetric})", fontsize=12)
             for spine in ["top", "right"]:
                 ax2.spines[spine].set_visible(False)
             out2_pdf = Path(str(clade_outprefix) + ".pdf")
@@ -668,7 +1106,7 @@ def plot_grammars_with_activity(
             fig2.savefig(out2_png, dpi=300, bbox_inches="tight")
             plt.close(fig2)
             print(f"Saved clade-variation-only figure: {out2_pdf}\nSaved clade-variation-only figure: {out2_png}")
-            print(f"Saved clade-variation sd_ftrend table: {out2_csv}")
+            print(f"Saved clade-variation {vmetric} table: {out2_csv}")
 
 
 def main():
@@ -687,6 +1125,23 @@ def main():
                    help='Plot only baseline violins (no IFNg panel).')
     p.add_argument('--baseline-and-variation', action='store_true',
                    help='Plot baseline violins and a patient-variation (sd_ftrend) panel (no IFNg panel).')
+    p.add_argument(
+        "--variation-metric",
+        choices=["sd_ftrend", "fstat"],
+        default="sd_ftrend",
+        help="Which variation metric to plot/test (sd_ftrend or fstat).",
+    )
+    p.add_argument(
+        "--pair-sp-only",
+        action="store_true",
+        help="Group matched grammar pairs that differ only by SP/KLF_site1 (SP- vs SP+) so they appear adjacent; keep unpaired grammars as well.",
+    )
+    p.add_argument(
+        "--pair-test",
+        choices=["brunnermunzel", "mannwhitney", "welch"],
+        default="brunnermunzel",
+        help="Two-sided test for SP- vs SP+ within each matched pair (brunnermunzel, mannwhitney, welch). Welch is run on log10(metric) after filtering metric>0.",
+    )
     args = p.parse_args()
 
     outprefix = Path(str(args.outfig) + f'_{args.order_by}Ordered')
@@ -704,6 +1159,9 @@ def main():
         args.order_by,
         baseline_only=args.baseline_only,
         baseline_and_variation=args.baseline_and_variation,
+        variation_metric=args.variation_metric,
+        pair_sp_only=args.pair_sp_only,
+        pair_test=args.pair_test,
     )
 
 
