@@ -35,6 +35,10 @@ We COLLAPSE site1 + site2 → 4 rows total:
     row 3: site5:
               if D == '1' → SP/KLF color
               else → absent
+
+python3 09_plot_patients_variability_tile13.py \
+    ../results/patients_variability/patient_tile13_signature_counts.tsv \
+    -o ../results/patients_variability/patient_tile13_variation.pdf
 """
 
 import argparse

@@ -20,7 +20,7 @@ Output: a heatmap-like figure where:
 
 python3 09_plot_patients_variability_tile6.py \
     ../results/patients_variability/patient_tile6_signature_counts.tsv \
-    -o ../results/patients_variability/patient_tile6_variation.png
+    -o ../results/patients_variability/patient_tile6_variation.pdf
 
 """
 

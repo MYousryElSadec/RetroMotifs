@@ -5,7 +5,7 @@ from collections import defaultdict
 import sys
 
 """
-python3 09_patients_variability.py \
+python3 09_patients_variability_tile6.py \
   --selected-patients ../data/patients/tile6_patients_selected.tsv \
   --patient-map ../data/patients/patients_accession_map.tsv \
   --site-presence ../results/motif_grammar_patients/tile6_site_presence_fixedbins.tsv \
